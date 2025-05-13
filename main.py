@@ -6,22 +6,25 @@ import os
 import tempfile
 import subprocess
 
-def telecharger_video_yt_dlp(url, chemin_sortie):
+def telecharger_video_yt_dlp(url, dossier_temporaire):
+    """
+    Télécharge une vidéo YouTube avec yt-dlp.
+    """
     commande = [
         "yt-dlp",
         "-f", "mp4",
-        "-o", os.path.join(chemin_sortie, "video_originale.%(ext)s"),
+        "-o", os.path.join(dossier_temporaire, "video_originale.%(ext)s"),
         url
     ]
     subprocess.run(commande, check=True)
-    for fichier in os.listdir(chemin_sortie):
+    for fichier in os.listdir(dossier_temporaire):
         if fichier.endswith(".mp4"):
-            return os.path.join(chemin_sortie, fichier)
+            return os.path.join(dossier_temporaire, fichier)
     return None
 
 def appliquer_optical_flow(images):
     """
-    Applique la visualisation du flux optique sur une liste d’images successives.
+    Applique la visualisation du flux optique sur les images successives.
     """
     images_avec_flow = []
     for i in range(len(images) - 1):
@@ -38,11 +41,13 @@ def appliquer_optical_flow(images):
                 cv2.arrowedLine(vis, (x, y), (int(x + fx), int(y + fy)),
                                 (0, 255, 0), 1, tipLength=0.4)
         images_avec_flow.append(vis)
-    # Ajouter dernière image sans flow
-    images_avec_flow.append(images[-1])
+    images_avec_flow.append(images[-1])  # Dernière image sans flow
     return images_avec_flow
 
 def extraire_images_echantillonnées(chemin_video, dossier_sortie, fps_cible, avec_flow=False):
+    """
+    Extrait les images à intervalle régulier (effet stop motion), avec option Optical Flow.
+    """
     cap = cv2.VideoCapture(chemin_video)
     fps_original = cap.get(cv2.CAP_PROP_FPS)
     ratio_saut = max(1, int(round(fps_original / fps_cible)))
@@ -61,97 +66,110 @@ def extraire_images_echantillonnées(chemin_video, dossier_sortie, fps_cible, av
         index += 1
     cap.release()
 
-    # Si l’utilisateur a activé le flux optique
     if avec_flow and len(images_extraites) > 1:
         images_extraites = appliquer_optical_flow(images_extraites)
 
-    # Sauvegarde des images dans le dossier
     for i, img in enumerate(images_extraites):
         nom = os.path.join(dossier_sortie, f"image_{i:05d}.jpg")
         cv2.imwrite(nom, img)
 
     return int(fps_original), len(images_extraites)
 
-def créer_vidéo_depuis_images(dossier_images, nom_fichier_sortie, fps=12, extension=".jpg"):
-    fichiers_images = sorted([
-        f for f in os.listdir(dossier_images)
-        if f.endswith(extension)
-    ])
-
-    if not fichiers_images:
-        st.error("Aucune image trouvée.")
+def créer_vidéo_depuis_images(dossier_images, chemin_sortie, fps=12):
+    """
+    Construit une vidéo à partir d’images extraites.
+    """
+    fichiers = sorted([f for f in os.listdir(dossier_images) if f.endswith(".jpg")])
+    if not fichiers:
         return None
 
-    image_exemple = cv2.imread(os.path.join(dossier_images, fichiers_images[0]))
-    hauteur, largeur, _ = image_exemple.shape
-
+    image_exemple = cv2.imread(os.path.join(dossier_images, fichiers[0]))
+    h, w, _ = image_exemple.shape
     codec = cv2.VideoWriter_fourcc(*'mp4v')
-    video = cv2.VideoWriter(nom_fichier_sortie, codec, fps, (largeur, hauteur))
+    video = cv2.VideoWriter(chemin_sortie, codec, fps, (w, h))
 
-    for nom_fichier in fichiers_images:
-        image = cv2.imread(os.path.join(dossier_images, nom_fichier))
-        if image is None:
-            continue
-        image_redim = cv2.resize(image, (largeur, hauteur))
-        video.write(image_redim)
+    for f in fichiers:
+        img = cv2.imread(os.path.join(dossier_images, f))
+        img = cv2.resize(img, (w, h))
+        video.write(img)
 
     video.release()
-    return nom_fichier_sortie
+    return chemin_sortie
+
+def reencoder_video_h264(chemin_entrée, chemin_sortie):
+    """
+    Réencode une vidéo en H.264 pour compatibilité Streamlit.
+    """
+    commande = [
+        "ffmpeg",
+        "-y",
+        "-i", chemin_entrée,
+        "-vcodec", "libx264",
+        "-preset", "fast",
+        "-crf", "23",
+        chemin_sortie
+    ]
+    subprocess.run(commande, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 # Interface Streamlit
-st.title("🎬 Création d'une vidéo Stop Motion avec option Optical Flow")
+st.title("Générateur de Stop Motion avec Optical Flow (optionnel)")
 
 mode = st.radio("Source de la vidéo :", ["YouTube (yt-dlp)", "Fichier local (.mp4)"])
 
 if mode == "YouTube (yt-dlp)":
-    url_youtube = st.text_input("Entrez l'URL de la vidéo YouTube")
+    url = st.text_input("Entrez l'URL de la vidéo YouTube")
 else:
-    fichier_upload = st.file_uploader("Téléversez un fichier vidéo .mp4", type=["mp4"])
+    fichier = st.file_uploader("Téléverser une vidéo .mp4", type=["mp4"])
 
-fps_cible = st.selectbox("Choisissez la fréquence Stop Motion", [4, 6, 8, 10, 12, 14, 16], index=2)
-
-avec_optical_flow = st.checkbox("🔍 Activer la visualisation des mouvements (Optical Flow)", value=False)
+fps_cible = st.selectbox("FPS cible (effet Stop Motion)", [4, 6, 8, 10, 12, 14, 16], index=2)
+avec_optical_flow = st.checkbox("Ajouter le flux optique (mouvement entre images)")
 
 if st.button("Créer la vidéo Stop Motion"):
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
+            # Charger la vidéo
             if mode == "YouTube (yt-dlp)":
-                if not url_youtube:
-                    st.error("Veuillez entrer une URL.")
+                if not url:
+                    st.error("Veuillez fournir une URL YouTube.")
                     st.stop()
                 st.info("Téléchargement de la vidéo...")
-                chemin_video = telecharger_video_yt_dlp(url_youtube, tmpdir)
-                st.success("Vidéo téléchargée.")
+                chemin_video = telecharger_video_yt_dlp(url, tmpdir)
+                st.success("Téléchargement terminé.")
             else:
-                if not fichier_upload:
+                if not fichier:
                     st.error("Veuillez téléverser une vidéo.")
                     st.stop()
                 chemin_video = os.path.join(tmpdir, "video_originale.mp4")
                 with open(chemin_video, "wb") as f:
-                    f.write(fichier_upload.read())
+                    f.write(fichier.read())
                 st.success("Vidéo téléversée.")
 
-            st.info("Extraction et traitement des images...")
+            # Extraction images
             dossier_images = os.path.join(tmpdir, "images")
             os.makedirs(dossier_images, exist_ok=True)
 
-            fps_origine, nb_images = extraire_images_echantillonnées(
+            st.info("Extraction des images en cours...")
+            fps_origine, nb = extraire_images_echantillonnées(
                 chemin_video, dossier_images, fps_cible, avec_flow=avec_optical_flow)
+            st.success(f"{nb} images extraites (FPS origine : {fps_origine})")
 
-            st.info(f"FPS d'origine : {fps_origine} | Images conservées : {nb_images}")
+            # Création de la vidéo temporaire
+            chemin_brut = os.path.join(tmpdir, "video_brute.mp4")
+            créer_vidéo_depuis_images(dossier_images, chemin_brut, fps=fps_cible)
 
-            st.info("Création de la vidéo finale...")
-            chemin_sortie = os.path.join(tmpdir, "stopmotion.mp4")
-            resultat = créer_vidéo_depuis_images(dossier_images, chemin_sortie, fps=fps_cible)
+            # Réencodage final
+            chemin_final = os.path.join(tmpdir, "video_finale.mp4")
+            st.info("Réencodage final (H.264)...")
+            reencoder_video_h264(chemin_brut, chemin_final)
 
-            if resultat:
-                with open(resultat, "rb") as fichier_vidéo:
-                    st.success("✅ Vidéo créée avec succès.")
-                    st.video(fichier_vidéo.read())
-                    st.download_button("📥 Télécharger la vidéo", data=fichier_vidéo, file_name="stopmotion.mp4")
+            with open(chemin_final, "rb") as f:
+                st.success("Vidéo générée avec succès.")
+                st.video(f.read())
+                st.download_button("Télécharger la vidéo", data=f, file_name="stopmotion.mp4", mime="video/mp4")
 
         except subprocess.CalledProcessError:
-            st.error("Erreur avec yt-dlp : assurez-vous qu’il est installé et dans le PATH.")
+            st.error("Erreur lors de l'utilisation de yt-dlp ou ffmpeg. Vérifiez leur installation.")
         except Exception as e:
             st.error(f"Erreur : {str(e)}")
+
 
